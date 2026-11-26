@@ -1,0 +1,1 @@
+Sample policy: Supplier onboarding requires identity verification, tax information, security questionnaire completion, and approval by the procurement owner. High-risk suppliers require a security review before activation.
