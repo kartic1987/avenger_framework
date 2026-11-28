@@ -26,7 +26,8 @@ SUPPORTED_MODULES = {
     "classification",
     "prediction",
     "workflow",
-    "code"
+    "code",
+    "loan"
 }
 
 if APP_MODULE not in SUPPORTED_MODULES:

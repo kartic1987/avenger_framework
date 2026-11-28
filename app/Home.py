@@ -112,7 +112,8 @@ MODULES = {
     "classification": "Classification & Risk",
     "prediction": "Predictive Analytics",
     "workflow": "Workflow Automation",
-    "code": "Code Intelligence"
+    "code": "Code Intelligence",
+    "loan": "Loan Document Processing"
 }
 
 if APP_MODULE not in MODULES:
@@ -128,10 +129,19 @@ st.set_page_config(
     page_title=MODULES[APP_MODULE],
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-st.title(f"🧠 {MODULES[APP_MODULE]}")
+module_keys = list(MODULES.keys())
+active_module = st.sidebar.selectbox(
+    "Active Module",
+    options=module_keys,
+    index=module_keys.index(APP_MODULE),
+    format_func=lambda key: MODULES[key],
+    key="active_module_selector",
+)
+
+st.title(f"🧠 {MODULES[active_module]}")
 st.caption("Powered by the Reusable GenAI Application Framework")
 
 st.divider()
@@ -141,7 +151,7 @@ st.divider()
 # 4. DOCUMENT INTELLIGENCE
 # ==================================================
 
-if APP_MODULE == "document":
+if active_module == "document":
 
     from core.llm import LLMClient
     from core.document_loader import extract_text
@@ -256,7 +266,7 @@ if APP_MODULE == "document":
 # 5. RAG KNOWLEDGE ASSISTANT
 # ==================================================
 
-elif APP_MODULE == "rag":
+elif active_module == "rag":
 
     from engines.rag_engine import RAGEngine
 
@@ -341,7 +351,7 @@ elif APP_MODULE == "rag":
 # 6. CLASSIFICATION AND RISK ASSESSMENT
 # ==================================================
 
-elif APP_MODULE == "classification":
+elif active_module == "classification":
 
     from engines.classification_engine import ClassificationEngine
 
@@ -420,7 +430,7 @@ elif APP_MODULE == "classification":
 # 7. PREDICTIVE ANALYTICS
 # ==================================================
 
-elif APP_MODULE == "prediction":
+elif active_module == "prediction":
 
     import pandas as pd
     from engines.prediction_engine import PredictionEngine
@@ -480,7 +490,7 @@ elif APP_MODULE == "prediction":
 # 8. WORKFLOW AUTOMATION
 # ==================================================
 
-elif APP_MODULE == "workflow":
+elif active_module == "workflow":
 
     from engines.workflow_engine import WorkflowEngine
 
@@ -541,7 +551,7 @@ elif APP_MODULE == "workflow":
 # 9. CODE INTELLIGENCE
 # ==================================================
 
-elif APP_MODULE == "code":
+elif active_module == "code":
 
     from engines.code_engine import CodeIntelligenceEngine
 
@@ -618,11 +628,185 @@ elif APP_MODULE == "code":
 
 
 # ==================================================
-# 10. FOOTER
+# 10. LOAN DOCUMENT PROCESSING
+# ==================================================
+
+elif active_module == "loan":
+
+    import pandas as pd
+    from modules.loan_processing import (
+        load_rules,
+        process_and_validate_loan_documents,
+        report_json,
+    )
+
+    st.subheader("Multi-Document Upload & Validation")
+    st.caption(
+        "Upload applicant KYC, income, and loan application documents (PDF, PNG, JPG, WEBP) "
+        "to extract fields, cross-check consistency, and summarize validation results."
+    )
+
+    rules = load_rules()
+    with st.expander("Configured loan rules & required documents"):
+        st.json(rules)
+
+    uploaded_files = st.file_uploader(
+        "Upload loan documents",
+        type=["pdf", "png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="loan_file_uploader",
+    )
+
+    use_gemini = st.toggle(
+        "Use Gemini AI extraction (automatically falls back to offline OCR if unavailable)",
+        value=True,
+        key="loan_use_gemini",
+    )
+
+    if uploaded_files:
+        file_sig = "|".join(
+            f"{f.name}:{len(f.getvalue())}:{hashlib.sha256(f.getvalue()).hexdigest()}"
+            for f in uploaded_files
+        ) + f"|gemini={use_gemini}"
+
+        if st.button("Validate Loan Documents", type="primary", key="loan_validate_btn"):
+            try:
+                progress_bar = st.progress(0.0, text="Validating loan documents...")
+                report = process_and_validate_loan_documents(
+                    uploaded_files,
+                    use_gemini=use_gemini,
+                    rules=rules,
+                    progress_callback=_make_progress_callback(progress_bar),
+                )
+                progress_bar.empty()
+                st.session_state["loan_validation_cache"] = {
+                    "key": file_sig,
+                    "report": report,
+                }
+            except Exception as e:
+                st.error(f"Loan validation error: {e}")
+
+        cached_loan = st.session_state.get("loan_validation_cache")
+        if cached_loan and cached_loan.get("key") == file_sig:
+            report = cached_loan["report"]
+            docs = report.get("documents", [])
+            issues = report.get("mismatch_issues", [])
+            missing_docs = report.get("missing_documents", [])
+            eligibility = report.get("eligibility", {})
+
+            st.divider()
+            st.subheader("Validation Summary")
+
+            overall_status = report.get("overall_status", "REVIEW_REQUIRED")
+            if overall_status == "REVIEW_REQUIRED":
+                st.warning(f"Overall Status: {overall_status}")
+            else:
+                st.info(f"Overall Status: {overall_status}")
+            st.caption(report.get("notice", ""))
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Documents Processed", len(docs))
+            m2.metric("Validation Issues", len(issues))
+            m3.metric("Missing Required Docs", len(missing_docs))
+            m4.metric("Eligibility Status", eligibility.get("status", "UNKNOWN"))
+
+            st.markdown("### Extracted Document Summary")
+            doc_rows = []
+            for doc in docs:
+                fields = doc.get("fields") or {}
+                doc_rows.append({
+                    "Filename": doc.get("filename"),
+                    "Detected Type": doc.get("document_type"),
+                    "Method": doc.get("extraction_method"),
+                    "Name": fields.get("name"),
+                    "DOB": fields.get("date_of_birth"),
+                    "PAN": fields.get("pan_number"),
+                    "Net Salary (INR)": fields.get("net_monthly_salary"),
+                    "Requested Loan (INR)": fields.get("requested_loan_amount"),
+                    "Warnings": len(doc.get("warnings") or []),
+                })
+            st.dataframe(
+                pd.DataFrame(doc_rows),
+                hide_index=True,
+                alt="Summary of extracted fields and detection method per uploaded loan document",
+            )
+
+            st.markdown("### Document Completeness & Cross-Document Checks")
+            if missing_docs:
+                st.warning(f"Missing required document types: {', '.join(missing_docs)}")
+            else:
+                st.success("All required document types are present.")
+
+            if issues:
+                issue_rows = [
+                    {
+                        "Field": issue.get("field"),
+                        "Status": issue.get("status"),
+                        "Severity": issue.get("severity"),
+                        "Values Across Documents": json.dumps(issue.get("values", {}), ensure_ascii=False),
+                        "Message": issue.get("message"),
+                    }
+                    for issue in issues
+                ]
+                st.dataframe(
+                    pd.DataFrame(issue_rows),
+                    hide_index=True,
+                    alt="Cross-document mismatch and field format validation issues",
+                )
+            else:
+                st.success("No cross-document mismatches or format validation issues detected.")
+
+            st.markdown("### Indicative Eligibility (FOIR)")
+            with st.container(border=True):
+                elig_status = eligibility.get("status")
+                if elig_status in {"INSUFFICIENT_DATA", "INVALID_INPUT"}:
+                    missing_inputs = eligibility.get("missing_inputs") or []
+                    detail = f" Missing inputs: {', '.join(missing_inputs)}." if missing_inputs else ""
+                    st.warning(f"Eligibility status: {elig_status}.{detail}")
+                else:
+                    e1, e2, e3, e4 = st.columns(4)
+                    e1.metric("Monthly Net Income (INR)", f"{eligibility.get('monthly_net_income_inr', 0):,.2f}")
+                    e2.metric("Proposed EMI (INR)", f"{eligibility.get('proposed_emi_inr', 0):,.2f}")
+                    e3.metric(
+                        "FOIR (%)",
+                        f"{eligibility.get('foir_percent', 0):.2f}%",
+                        f"Max {eligibility.get('maximum_foir_percent', 0)}%",
+                    )
+                    e4.metric(
+                        "Indicative Max Loan (INR)",
+                        f"{eligibility.get('indicative_max_loan_amount_inr', 0):,.2f}",
+                    )
+                    st.caption(
+                        f"Rule checks — Income passed: {eligibility.get('income_rule_passed')} | "
+                        f"Tenure passed: {eligibility.get('tenure_rule_passed')} | "
+                        f"FOIR passed: {eligibility.get('foir_rule_passed')}"
+                    )
+                    if eligibility.get("disclaimer"):
+                        st.caption(eligibility["disclaimer"])
+
+            with st.expander("View detailed extracted fields per document"):
+                for doc in docs:
+                    st.markdown(f"**{doc.get('filename')}** (`{doc.get('document_type')}` via `{doc.get('extraction_method')}`)")
+                    if doc.get("warnings"):
+                        for warn in doc["warnings"]:
+                            st.warning(warn)
+                    st.json(doc.get("fields", {}))
+
+            st.download_button(
+                "Download Validation Report (JSON)",
+                data=report_json(report),
+                file_name="loan_validation_report.json",
+                mime="application/json",
+                key="loan_download_report_btn",
+            )
+
+
+# ==================================================
+# 11. FOOTER
 # ==================================================
 
 st.divider()
 
 st.caption(
-    f"GenAI Reusable Framework | Active Module: {MODULES[APP_MODULE]}"
+    f"GenAI Reusable Framework | Active Module: {MODULES[active_module]}"
 )

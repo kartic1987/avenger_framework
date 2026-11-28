@@ -1,0 +1,13 @@
+{
+  "minimum_net_monthly_income": 25000,
+  "minimum_tenure_months": 12,
+  "maximum_tenure_months": 84,
+  "maximum_foir_percent": 50,
+  "default_annual_interest_rate_percent": 11.5,
+  "required_document_types": [
+    "PAN",
+    "AADHAAR",
+    "SALARY_SLIP",
+    "LOAN_APPLICATION"
+  ]
+}
