@@ -1,75 +1,48 @@
+from datetime import date
 import re
-from datetime import date, datetime
-from rapidfuzz.fuzz import ratio
-from .models import ValidationIssue
+
+from core.validation import (
+    ValidationIssue,
+    check_required_categories,
+    compare_records,
+    normalize_date,
+    normalize_identifier,
+    normalize_text,
+)
 
 COMPARABLE_FIELDS = ["name", "date_of_birth", "pan_number"]
 
-def normalize_name(value):
-    if value is None:
-        return ""
-    return re.sub(r"[^A-Z0-9 ]", "", str(value).upper()).strip()
+normalize_name = normalize_text
+normalize_pan = normalize_identifier
 
-def normalize_date(value):
-    if value is None:
-        return ""
-    raw = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y"):
-        try:
-            return datetime.strptime(raw, fmt).date().isoformat()
-        except ValueError:
-            pass
-    return raw.upper()
-
-def normalize_pan(value):
-    return re.sub(r"\s+", "", str(value or "").upper())
 
 def _field_value(doc, field):
     return (doc.fields or {}).get(field)
 
+
 def compare_documents(documents):
-    issues = []
-    for field in COMPARABLE_FIELDS:
-        values = {}
-        for doc in documents:
-            value = _field_value(doc, field)
-            if value not in (None, ""):
-                values[doc.filename] = str(value)
-        if len(values) < 2:
-            continue
+    return compare_records(
+        records=documents,
+        name_getter=lambda doc: doc.filename,
+        fields_getter=lambda doc: doc.fields or {},
+        exact_fields=("date_of_birth", "pan_number"),
+        fuzzy_fields=("name",),
+        fuzzy_threshold=95,
+    )
 
-        normalized = []
-        for value in values.values():
-            if field == "name":
-                normalized.append(normalize_name(value))
-            elif field == "date_of_birth":
-                normalized.append(normalize_date(value))
-            else:
-                normalized.append(normalize_pan(value))
-
-        if field == "name":
-            scores = [ratio(normalized[i], normalized[j])
-                      for i in range(len(normalized)) for j in range(i + 1, len(normalized))]
-            if scores and min(scores) < 95:
-                issues.append(ValidationIssue(
-                    field, "POSSIBLE_MISMATCH", values,
-                    f"Name values differ (lowest similarity {min(scores)}%). Manual review required."
-                ))
-        elif len(set(normalized)) > 1:
-            issues.append(ValidationIssue(
-                field, "MISMATCH", values,
-                f"{field.replace('_', ' ').title()} differs across documents."
-            ))
-    return issues
 
 def check_document_completeness(documents, required_types):
-    present = {d.document_type for d in documents}
-    return sorted(set(required_types) - present)
+    return check_required_categories(
+        present_categories=(d.document_type for d in documents),
+        required_categories=required_types,
+    )
+
 
 def validate_pan_format(pan):
     if not pan:
         return None
     return bool(re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", normalize_pan(pan)))
+
 
 def parse_date(value):
     normalized = normalize_date(value)

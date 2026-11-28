@@ -1,5 +1,8 @@
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
+
+from core.validation import ValidationIssue
+
 
 @dataclass
 class ExtractedDocument:
@@ -8,17 +11,6 @@ class ExtractedDocument:
     fields: dict[str, Any]
     extraction_method: str
     warnings: list[str]
-
-    def to_dict(self):
-        return asdict(self)
-
-@dataclass
-class ValidationIssue:
-    field: str
-    status: str
-    values: dict[str, str]
-    message: str
-    severity: str = "REVIEW"
 
     def to_dict(self):
         return asdict(self)

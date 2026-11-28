@@ -1,12 +1,18 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
+from core.audit import AuditLogger
+from core.privacy import mask_dict_fields, mask_identifier, redact_pii_text
 from modules.loan_processing import (
     load_rules,
+    loan_report_pdf,
     process_and_validate_loan_documents,
+    re_evaluate_loan_assessment,
     report_json,
 )
 
@@ -94,20 +100,34 @@ class LoanProcessingTests(unittest.TestCase):
             ),
         ]
 
-        progress_events = []
-        report = process_and_validate_loan_documents(
-            uploads,
-            use_gemini=False,
-            progress_callback=lambda d, t, m: progress_events.append((d, t, m)),
-        )
+        with tempfile.TemporaryDirectory() as td:
+            logger = AuditLogger(module="loan_test", log_path=Path(td) / "audit.jsonl")
+            progress_events = []
+            report = process_and_validate_loan_documents(
+                uploads,
+                use_gemini=False,
+                progress_callback=lambda d, t, m: progress_events.append((d, t, m)),
+                audit_logger=logger,
+            )
 
-        self.assertEqual(len(report["documents"]), 4)
-        self.assertEqual(report["missing_documents"], [])
-        self.assertEqual(report["mismatch_issues"], [])
-        self.assertEqual(report["eligibility"]["status"], "WITHIN_CONFIGURED_LIMITS")
-        self.assertEqual(report["overall_status"], "ASSESSMENT_REQUIRES_HUMAN_REVIEW")
-        self.assertTrue(progress_events)
-        self.assertIn("WITHIN_CONFIGURED_LIMITS", report_json(report))
+            self.assertEqual(len(report["documents"]), 4)
+            self.assertEqual(report["missing_documents"], [])
+            self.assertEqual(report["mismatch_issues"], [])
+            self.assertEqual(report["eligibility"]["status"], "WITHIN_CONFIGURED_LIMITS")
+            self.assertEqual(report["overall_status"], "ASSESSMENT_REQUIRES_HUMAN_REVIEW")
+            self.assertEqual(report["banking_checks"]["identity_verification"]["status"], "VERIFIED")
+            self.assertGreaterEqual(report["banking_checks"]["credit_bureau"]["credit_score"], 650)
+            self.assertGreaterEqual(len(report["audit_trail"]), 5)
+            self.assertTrue((Path(td) / "audit.jsonl").is_file())
+            self.assertTrue(progress_events)
+            self.assertIn("WITHIN_CONFIGURED_LIMITS", report_json(report))
+
+            pdf_bytes = loan_report_pdf(report, mask_pii=True)
+            self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+
+            masked_json = report_json(report, mask_pii=True)
+            self.assertNotIn("ABCDE1234F", masked_json)
+            self.assertIn("******234F", masked_json)
 
     def test_multi_document_validation_detects_mismatches_and_missing(self):
         uploads = [
@@ -130,13 +150,46 @@ class LoanProcessingTests(unittest.TestCase):
             ),
         ]
 
-        report = process_and_validate_loan_documents(uploads, use_gemini=False)
-        issue_fields = {issue["field"] for issue in report["mismatch_issues"]}
-        self.assertIn("name", issue_fields)
-        self.assertIn("date_of_birth", issue_fields)
-        self.assertIn("SALARY_SLIP", report["missing_documents"])
-        self.assertIn("LOAN_APPLICATION", report["missing_documents"])
-        self.assertEqual(report["overall_status"], "REVIEW_REQUIRED")
+        with tempfile.TemporaryDirectory() as td:
+            logger = AuditLogger(module="loan_test_mismatch", log_path=Path(td) / "audit.jsonl")
+            report = process_and_validate_loan_documents(uploads, use_gemini=False, audit_logger=logger)
+            issue_fields = {issue["field"] for issue in report["mismatch_issues"]}
+            self.assertIn("name", issue_fields)
+            self.assertIn("date_of_birth", issue_fields)
+            self.assertIn("SALARY_SLIP", report["missing_documents"])
+            self.assertIn("LOAN_APPLICATION", report["missing_documents"])
+            self.assertEqual(report["overall_status"], "REVIEW_REQUIRED")
+
+            # Interactive correction fixes name/DOB discrepancy
+            edited_docs = list(report["documents"])
+            edited_docs[1] = {
+                **edited_docs[1],
+                "fields": {**edited_docs[1]["fields"], "name": "RAHUL SHARMA", "date_of_birth": "1990-05-14"},
+            }
+            re_eval = re_evaluate_loan_assessment(edited_docs, audit_logger=logger)
+            re_issue_fields = {issue["field"] for issue in re_eval["mismatch_issues"]}
+            self.assertNotIn("name", re_issue_fields)
+            self.assertNotIn("date_of_birth", re_issue_fields)
+
+    def test_privacy_helpers_and_low_credit_score_flag(self):
+        self.assertEqual(mask_identifier("ABCDE1234F"), "******234F")
+        masked = mask_dict_fields({"pan_number": "ABCDE1234F", "name": "RAHUL"})
+        self.assertEqual(masked["pan_number"], "******234F")
+        self.assertEqual(masked["name"], "RAHUL")
+        self.assertNotIn("9876543210", redact_pii_text("Call 9876543210 or mail a@b.com"))
+
+        uploads = [
+            _DummyUpload("pan.pdf", _make_text_pdf(["PAN CARD", "Name: TEST USER", "DOB: 1991-01-01", "PAN: LOWSC1234A"])),
+            _DummyUpload("aadhaar.pdf", _make_text_pdf(["AADHAAR", "Name: TEST USER", "DOB: 1991-01-01", "Aadhaar: XXXX XXXX 1111"])),
+            _DummyUpload("salary.pdf", _make_text_pdf(["SALARY SLIP", "Employee Name: TEST USER", "Net Monthly Salary: 80000"])),
+            _DummyUpload("app.pdf", _make_text_pdf(["LOAN APPLICATION", "Applicant Name: TEST USER", "PAN: LOWSC1234A", "Requested Loan Amount: 500000", "Requested Tenure Months: 36"])),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            logger = AuditLogger(module="loan_low_score", log_path=Path(td) / "audit.jsonl")
+            report = process_and_validate_loan_documents(uploads, use_gemini=False, audit_logger=logger)
+            self.assertEqual(report["banking_checks"]["credit_bureau"]["credit_score"], 595)
+            self.assertEqual(report["eligibility"]["status"], "OUTSIDE_CONFIGURED_LIMITS")
+            self.assertIn("credit_score", {i["field"] for i in report["mismatch_issues"]})
 
     def test_image_ocr_fallback_without_tesseract(self):
         png_bytes = _make_png_doc([

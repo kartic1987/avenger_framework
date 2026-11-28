@@ -3,6 +3,7 @@
   "minimum_tenure_months": 12,
   "maximum_tenure_months": 84,
   "maximum_foir_percent": 50,
+  "minimum_credit_score": 650,
   "default_annual_interest_rate_percent": 11.5,
   "required_document_types": [
     "PAN",

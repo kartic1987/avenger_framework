@@ -634,54 +634,83 @@ elif active_module == "code":
 elif active_module == "loan":
 
     import pandas as pd
+    from core.audit import AuditLogger
+    from core.privacy import mask_dict_fields
     from modules.loan_processing import (
         load_rules,
+        loan_report_pdf,
         process_and_validate_loan_documents,
+        re_evaluate_loan_assessment,
         report_json,
     )
+    from modules.loan_processing.gemini_extractor import ALLOWED_TYPES
 
-    st.subheader("Multi-Document Upload & Validation")
+    st.subheader("AI-Driven Loan Application Document Analyzer")
     st.caption(
-        "Upload applicant KYC, income, and loan application documents (PDF, PNG, JPG, WEBP) "
-        "to extract fields, cross-check consistency, and summarize validation results."
+        "Batch-upload applicant KYC, salary, and loan application documents (PDF, PNG, JPG, WEBP) "
+        "to classify documents, highlight key data, detect discrepancies, run credit/identity checks, "
+        "apply interactive corrections, and export PDF/JSON reports with audit trails."
     )
 
     rules = load_rules()
-    with st.expander("Configured loan rules & required documents"):
+    with st.expander("Configured loan policy rules & required documents"):
         st.json(rules)
 
+    c1, c2, c3 = st.columns(3)
+    actor_role = c1.selectbox(
+        "Reviewer Role",
+        ["Loan Officer", "Underwriter", "Compliance Auditor"],
+        key="loan_actor_role",
+    )
+    use_gemini = c2.toggle(
+        "Use Gemini AI extraction",
+        value=True,
+        key="loan_use_gemini",
+        help="Falls back to offline OCR automatically if Gemini is unavailable.",
+    )
+    mask_pii = c3.toggle(
+        "Mask sensitive PII (GDPR / PCI mode)",
+        value=False,
+        key="loan_mask_pii",
+    )
+    run_banking_api = st.toggle(
+        "Run Banking Credit Bureau & Identity Verification APIs (Simulated)",
+        value=True,
+        key="loan_run_banking_api",
+    )
+
     uploaded_files = st.file_uploader(
-        "Upload loan documents",
+        "Upload loan documents (batch)",
         type=["pdf", "png", "jpg", "jpeg", "webp"],
         accept_multiple_files=True,
         key="loan_file_uploader",
-    )
-
-    use_gemini = st.toggle(
-        "Use Gemini AI extraction (automatically falls back to offline OCR if unavailable)",
-        value=True,
-        key="loan_use_gemini",
     )
 
     if uploaded_files:
         file_sig = "|".join(
             f"{f.name}:{len(f.getvalue())}:{hashlib.sha256(f.getvalue()).hexdigest()}"
             for f in uploaded_files
-        ) + f"|gemini={use_gemini}"
+        ) + f"|gemini={use_gemini}|banking={run_banking_api}"
 
         if st.button("Validate Loan Documents", type="primary", key="loan_validate_btn"):
             try:
+                audit_logger = AuditLogger(module="loan_processing")
                 progress_bar = st.progress(0.0, text="Validating loan documents...")
                 report = process_and_validate_loan_documents(
                     uploaded_files,
                     use_gemini=use_gemini,
                     rules=rules,
                     progress_callback=_make_progress_callback(progress_bar),
+                    run_banking_api_checks=run_banking_api,
+                    actor_role=actor_role,
+                    audit_logger=audit_logger,
                 )
                 progress_bar.empty()
                 st.session_state["loan_validation_cache"] = {
                     "key": file_sig,
                     "report": report,
+                    "audit_logger": audit_logger,
+                    "edit_nonce": 0,
                 }
             except Exception as e:
                 st.error(f"Loan validation error: {e}")
@@ -689,13 +718,15 @@ elif active_module == "loan":
         cached_loan = st.session_state.get("loan_validation_cache")
         if cached_loan and cached_loan.get("key") == file_sig:
             report = cached_loan["report"]
+            audit_logger = cached_loan["audit_logger"]
             docs = report.get("documents", [])
             issues = report.get("mismatch_issues", [])
             missing_docs = report.get("missing_documents", [])
             eligibility = report.get("eligibility", {})
+            banking = report.get("banking_checks", {})
 
             st.divider()
-            st.subheader("Validation Summary")
+            st.subheader("Validation & Financial Summary")
 
             overall_status = report.get("overall_status", "REVIEW_REQUIRED")
             if overall_status == "REVIEW_REQUIRED":
@@ -704,34 +735,151 @@ elif active_module == "loan":
                 st.info(f"Overall Status: {overall_status}")
             st.caption(report.get("notice", ""))
 
+            bureau = banking.get("credit_bureau", {})
+            identity = banking.get("identity_verification", {})
+
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Documents Processed", len(docs))
-            m2.metric("Validation Issues", len(issues))
-            m3.metric("Missing Required Docs", len(missing_docs))
+            m2.metric("Discrepancies / Issues", len(issues))
+            m3.metric(
+                "Credit Score (Simulated)",
+                bureau.get("credit_score") if bureau.get("credit_score") is not None else "N/A",
+                bureau.get("risk_band") if bureau.get("credit_score") is not None else None,
+            )
             m4.metric("Eligibility Status", eligibility.get("status", "UNKNOWN"))
 
-            st.markdown("### Extracted Document Summary")
+            if banking:
+                b1, b2 = st.columns(2)
+                with b1:
+                    with st.container(border=True):
+                        st.markdown("**Identity Verification API (Simulated)**")
+                        st.write(f"Status: `{identity.get('status', 'N/A')}`")
+                        st.caption(
+                            f"PAN Checked: `{identity.get('pan_checked') or 'None'}` | "
+                            f"Aadhaar Last4 Present: `{identity.get('aadhaar_last4_present')}`"
+                        )
+                with b2:
+                    with st.container(border=True):
+                        st.markdown("**Credit Bureau Scoring API (Simulated)**")
+                        st.write(
+                            f"Score: `{bureau.get('credit_score', 'N/A')}` | "
+                            f"Band: `{bureau.get('risk_band', 'N/A')}`"
+                        )
+                        st.caption(
+                            f"Delinquencies (12m): `{bureau.get('delinquencies_12m', 'N/A')}` | "
+                            f"Active Accounts: `{bureau.get('active_accounts', 'N/A')}`"
+                        )
+
+            st.markdown("### Extracted Key Data & Interactive Corrections")
+            if mask_pii:
+                st.caption("PII masking is active; identity columns are read-only until PII masking is turned off.")
+
             doc_rows = []
             for doc in docs:
-                fields = doc.get("fields") or {}
+                raw_fields = doc.get("fields") or {}
+                shown = mask_dict_fields(raw_fields) if mask_pii else raw_fields
                 doc_rows.append({
                     "Filename": doc.get("filename"),
-                    "Detected Type": doc.get("document_type"),
+                    "Document Type": doc.get("document_type"),
                     "Method": doc.get("extraction_method"),
-                    "Name": fields.get("name"),
-                    "DOB": fields.get("date_of_birth"),
-                    "PAN": fields.get("pan_number"),
-                    "Net Salary (INR)": fields.get("net_monthly_salary"),
-                    "Requested Loan (INR)": fields.get("requested_loan_amount"),
-                    "Warnings": len(doc.get("warnings") or []),
+                    "Name": shown.get("name") or "",
+                    "DOB": shown.get("date_of_birth") or "",
+                    "PAN": shown.get("pan_number") or "",
+                    "Aadhaar Last4": shown.get("aadhaar_last4") or "",
+                    "Net Salary (INR)": float(raw_fields["net_monthly_salary"]) if raw_fields.get("net_monthly_salary") is not None else None,
+                    "Existing EMI (INR)": float(raw_fields["existing_emi"]) if raw_fields.get("existing_emi") is not None else None,
+                    "Requested Loan (INR)": float(raw_fields["requested_loan_amount"]) if raw_fields.get("requested_loan_amount") is not None else None,
+                    "Tenure (Months)": int(raw_fields["requested_tenure_months"]) if raw_fields.get("requested_tenure_months") is not None else None,
                 })
-            st.dataframe(
+
+            disabled_cols = ["Filename", "Method"]
+            if mask_pii:
+                disabled_cols.extend(["DOB", "PAN", "Aadhaar Last4"])
+
+            editor_key = f"loan_editor_{cached_loan.get('edit_nonce', 0)}"
+            edited_df = st.data_editor(
                 pd.DataFrame(doc_rows),
+                key=editor_key,
                 hide_index=True,
-                alt="Summary of extracted fields and detection method per uploaded loan document",
+                disabled=disabled_cols,
+                column_config={
+                    "Document Type": st.column_config.SelectboxColumn("Document Type", options=ALLOWED_TYPES),
+                    "Net Salary (INR)": st.column_config.NumberColumn("Net Salary (INR)", min_value=0.0, format="%.2f"),
+                    "Existing EMI (INR)": st.column_config.NumberColumn("Existing EMI (INR)", min_value=0.0, format="%.2f"),
+                    "Requested Loan (INR)": st.column_config.NumberColumn("Requested Loan (INR)", min_value=0.0, format="%.2f"),
+                    "Tenure (Months)": st.column_config.NumberColumn("Tenure (Months)", min_value=1, step=1),
+                },
+                alt="Editable table of extracted loan document fields for interactive corrections",
             )
 
-            st.markdown("### Document Completeness & Cross-Document Checks")
+            if st.button("Apply Corrections & Re-Validate", key="loan_apply_edits_btn"):
+                updated_docs = []
+                changed_count = 0
+                for idx, doc in enumerate(docs):
+                    row = edited_df.iloc[idx]
+                    new_fields = dict(doc.get("fields") or {})
+                    new_type = str(row["Document Type"])
+                    changed_fields = []
+                    if new_type != doc.get("document_type"):
+                        changed_fields.append("document_type")
+
+                    field_map = {
+                        "name": row["Name"] or None,
+                        "net_monthly_salary": None if pd.isna(row["Net Salary (INR)"]) else float(row["Net Salary (INR)"]),
+                        "existing_emi": None if pd.isna(row["Existing EMI (INR)"]) else float(row["Existing EMI (INR)"]),
+                        "requested_loan_amount": None if pd.isna(row["Requested Loan (INR)"]) else float(row["Requested Loan (INR)"]),
+                        "requested_tenure_months": None if pd.isna(row["Tenure (Months)"]) else int(row["Tenure (Months)"]),
+                    }
+                    if not mask_pii:
+                        field_map["date_of_birth"] = row["DOB"] or None
+                        field_map["pan_number"] = row["PAN"] or None
+                        field_map["aadhaar_last4"] = row["Aadhaar Last4"] or None
+
+                    for f_key, f_val in field_map.items():
+                        if new_fields.get(f_key) != f_val:
+                            new_fields[f_key] = f_val
+                            changed_fields.append(f_key)
+
+                    if changed_fields:
+                        changed_count += 1
+                        audit_logger.record(
+                            action="INTERACTIVE_CORRECTION",
+                            actor_role=actor_role,
+                            target=doc.get("filename", ""),
+                            status="UPDATED",
+                            details={"fields_modified": changed_fields},
+                        )
+
+                    updated_docs.append({
+                        **doc,
+                        "document_type": new_type,
+                        "fields": new_fields,
+                        "extraction_method": (
+                            f"{doc.get('extraction_method')} (Edited)"
+                            if changed_fields and "(Edited)" not in str(doc.get("extraction_method"))
+                            else doc.get("extraction_method")
+                        ),
+                    })
+
+                if changed_count == 0:
+                    st.info("No field changes detected.")
+                else:
+                    re_evaluated = re_evaluate_loan_assessment(
+                        documents=updated_docs,
+                        rules=rules,
+                        run_banking_api_checks=run_banking_api,
+                        actor_role=actor_role,
+                        audit_logger=audit_logger,
+                    )
+                    st.session_state["loan_validation_cache"] = {
+                        "key": file_sig,
+                        "report": re_evaluated,
+                        "audit_logger": audit_logger,
+                        "edit_nonce": cached_loan.get("edit_nonce", 0) + 1,
+                    }
+                    st.rerun()
+
+            st.markdown("### Document Completeness & Discrepancy Detection")
             if missing_docs:
                 st.warning(f"Missing required document types: {', '.join(missing_docs)}")
             else:
@@ -751,12 +899,12 @@ elif active_module == "loan":
                 st.dataframe(
                     pd.DataFrame(issue_rows),
                     hide_index=True,
-                    alt="Cross-document mismatch and field format validation issues",
+                    alt="Cross-document discrepancy, format, and banking check issues",
                 )
             else:
-                st.success("No cross-document mismatches or format validation issues detected.")
+                st.success("No cross-document discrepancies or validation issues detected.")
 
-            st.markdown("### Indicative Eligibility (FOIR)")
+            st.markdown("### Indicative Financial Summary & FOIR Visualization")
             with st.container(border=True):
                 elig_status = eligibility.get("status")
                 if elig_status in {"INSUFFICIENT_DATA", "INVALID_INPUT"}:
@@ -776,29 +924,67 @@ elif active_module == "loan":
                         "Indicative Max Loan (INR)",
                         f"{eligibility.get('indicative_max_loan_amount_inr', 0):,.2f}",
                     )
+
+                    chart_df = pd.DataFrame({
+                        "Component": ["Net Monthly Income", "Existing EMI", "Proposed EMI", "Available Headroom"],
+                        "Amount (INR)": [
+                            eligibility.get("monthly_net_income_inr", 0),
+                            eligibility.get("existing_emi_inr", 0),
+                            eligibility.get("proposed_emi_inr", 0),
+                            eligibility.get("available_emi_headroom_inr", 0),
+                        ],
+                    })
+                    st.bar_chart(
+                        chart_df,
+                        x="Component",
+                        y="Amount (INR)",
+                        alt="Monthly income versus existing EMI, proposed EMI, and available EMI headroom",
+                    )
+
                     st.caption(
                         f"Rule checks — Income passed: {eligibility.get('income_rule_passed')} | "
                         f"Tenure passed: {eligibility.get('tenure_rule_passed')} | "
-                        f"FOIR passed: {eligibility.get('foir_rule_passed')}"
+                        f"FOIR passed: {eligibility.get('foir_rule_passed')} | "
+                        f"Credit Score passed: {eligibility.get('credit_score_rule_passed')}"
                     )
                     if eligibility.get("disclaimer"):
                         st.caption(eligibility["disclaimer"])
 
-            with st.expander("View detailed extracted fields per document"):
+            with st.expander("View detailed extracted fields & warnings per document"):
                 for doc in docs:
+                    fields_view = mask_dict_fields(doc.get("fields") or {}) if mask_pii else (doc.get("fields") or {})
                     st.markdown(f"**{doc.get('filename')}** (`{doc.get('document_type')}` via `{doc.get('extraction_method')}`)")
                     if doc.get("warnings"):
                         for warn in doc["warnings"]:
                             st.warning(warn)
-                    st.json(doc.get("fields", {}))
+                    st.json(fields_view)
 
-            st.download_button(
-                "Download Validation Report (JSON)",
-                data=report_json(report),
-                file_name="loan_validation_report.json",
-                mime="application/json",
-                key="loan_download_report_btn",
-            )
+            with st.expander("View processing audit trail"):
+                audit_events = report.get("audit_trail", [])
+                if audit_events:
+                    st.dataframe(
+                        pd.DataFrame(audit_events),
+                        hide_index=True,
+                        alt="Timestamped audit trail of document extraction, banking checks, and corrections",
+                    )
+                else:
+                    st.caption("No audit events recorded yet.")
+
+            with st.container(horizontal=True):
+                st.download_button(
+                    "Download PDF Report",
+                    data=loan_report_pdf(report, mask_pii=mask_pii),
+                    file_name="loan_validation_report.pdf",
+                    mime="application/pdf",
+                    key="loan_download_pdf_btn",
+                )
+                st.download_button(
+                    "Download JSON Report",
+                    data=report_json(report, mask_pii=mask_pii),
+                    file_name="loan_validation_report.json",
+                    mime="application/json",
+                    key="loan_download_report_btn",
+                )
 
 
 # ==================================================

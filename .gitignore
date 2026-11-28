@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 data/uploads/*
 data/ocr_cache/*
+data/audit_logs/*
 data/knowledge/index.json
 .DS_Store

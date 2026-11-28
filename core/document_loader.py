@@ -241,3 +241,43 @@ def extract_text(
     if ext == ".json":
         return json.dumps(json.loads(data.decode("utf-8")), indent=2, ensure_ascii=False)
     return ""
+
+
+def load_visual_document(filename: str, data: bytes, render_scale: float = 1.5) -> dict:
+    """Load a PDF or image into selectable text + rendered PNG page images for multimodal/OCR flows."""
+    ext = Path(filename or "").suffix.lower()
+    if ext == ".pdf":
+        import pymupdf
+
+        texts, images = [], []
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            matrix = pymupdf.Matrix(render_scale, render_scale)
+            for page in doc:
+                page_text = (page.get_text("text") or "").strip()
+                if page_text:
+                    texts.append(page_text)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                images.append(pix.tobytes("png"))
+        return {
+            "filename": filename,
+            "text": "\n".join(texts).strip(),
+            "images": images,
+            "mime_type": "application/pdf",
+            "raw_bytes": data,
+        }
+
+    if ext in {".png", ".jpg", ".jpeg", ".webp"}:
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(data)).convert("RGB")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return {
+            "filename": filename,
+            "text": "",
+            "images": [buf.getvalue()],
+            "mime_type": "image/png",
+            "raw_bytes": data,
+        }
+
+    raise ValueError(f"Unsupported visual document type: {ext or 'unknown'}")

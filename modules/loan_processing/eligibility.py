@@ -27,8 +27,8 @@ def loan_amount_for_emi(monthly_emi, annual_rate_percent, months):
     factor = (1 + monthly_rate) ** months
     return monthly_emi * (factor - 1) / (monthly_rate * factor)
 
-def assess_eligibility(application_fields, salary_fields, rules):
-    """Indicative FOIR calculation. Missing inputs result in INSUFFICIENT_DATA."""
+def assess_eligibility(application_fields, salary_fields, rules, credit_score=None):
+    """Indicative FOIR + policy rule calculation. Missing inputs result in INSUFFICIENT_DATA."""
     income = salary_fields.get("net_monthly_salary")
     existing_emi = application_fields.get("existing_emi", 0) or 0
     requested = application_fields.get("requested_loan_amount")
@@ -56,19 +56,24 @@ def assess_eligibility(application_fields, salary_fields, rules):
     income_ok = income >= rules["minimum_net_monthly_income"]
     tenure_ok = rules["minimum_tenure_months"] <= tenure <= rules["maximum_tenure_months"]
     foir_ok = foir <= rules["maximum_foir_percent"]
-    status = "WITHIN_CONFIGURED_LIMITS" if income_ok and tenure_ok and foir_ok else "OUTSIDE_CONFIGURED_LIMITS"
+    min_score = rules.get("minimum_credit_score")
+    credit_ok = True if (credit_score is None or min_score is None) else (credit_score >= min_score)
+    status = "WITHIN_CONFIGURED_LIMITS" if income_ok and tenure_ok and foir_ok and credit_ok else "OUTSIDE_CONFIGURED_LIMITS"
 
     return {
         "status": status,
         "monthly_net_income_inr": round(income, 2),
         "existing_emi_inr": round(existing_emi, 2),
         "proposed_emi_inr": round(proposed_emi, 2),
+        "available_emi_headroom_inr": round(available_emi, 2),
         "foir_percent": round(foir, 2),
         "maximum_foir_percent": rules["maximum_foir_percent"],
         "indicative_max_loan_amount_inr": round(indicative_max_loan, 2),
         "requested_loan_amount_inr": round(requested, 2),
+        "credit_score": credit_score,
         "income_rule_passed": income_ok,
         "tenure_rule_passed": tenure_ok,
         "foir_rule_passed": foir_ok,
+        "credit_score_rule_passed": credit_ok,
         "disclaimer": "Indicative calculation only; not a credit decision or loan approval."
     }
